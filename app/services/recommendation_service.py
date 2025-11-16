@@ -100,7 +100,17 @@ class RecommendationService:
         Fetch recommendations from TMDB for a given TMDB ID.
         """
         if isinstance(item_id, int):
-            tmdb_id = str(item_id)
+            item_id = str(item_id)
+
+        if item_id.startswith("tt"):
+            tmdb_id, media_type = await self.tmdb_service.find_by_imdb_id(item_id)
+            if not tmdb_id:
+                logger.warning(f"No TMDB ID found for {item_id}")
+                return []
+        elif item_id.startswith("tmdb:"):
+            tmdb_id = int(item_id.split(":")[1])
+        else:
+            tmdb_id = item_id
 
         media_type = "movie" if media_type == "movie" else "tv"
 
@@ -190,32 +200,22 @@ class RecommendationService:
         # Use dictionary to deduplicate by IMDB ID and combine scores
         unique_recommendations: Dict[str, Dict] = {}  # Key: IMDB ID, Value: Full recommendation data
 
-        fetch_meta_tasks = []
+        flat_recommendations = []
         for recommendation_batch in all_recommendation_results:
             if isinstance(recommendation_batch, Exception):
                 logger.warning(f"Error processing source item: {recommendation_batch}")
                 continue
 
             for recommendation in recommendation_batch:
-                # Extract IMDB ID from recommendation metadata
-                tmdb_id = recommendation.get("id")
-                media_type = recommendation.get("media_type")
-                stremio_type = "movie" if media_type == "movie" else "series"
-                fetch_meta_tasks.append(self.tmdb_service.get_addon_meta(stremio_type, f"tmdb:{tmdb_id}"))
+                flat_recommendations.append(recommendation)
 
-        addon_meta_results = await asyncio.gather(*fetch_meta_tasks, return_exceptions=True)
+        final_recommendations = await self._fetch_catlogs_from_tmdb_addon(flat_recommendations, content_type)
 
-        for addon_meta in addon_meta_results:
-            if isinstance(addon_meta, Exception):
-                logger.warning(f"Error processing source item: {addon_meta}")
-                continue
-
-            meta_data = addon_meta.get("meta", {})
+        for meta_data in final_recommendations:
             imdb_id = meta_data.get("imdb_id") or meta_data.get("id")
-            tmdb_id = meta_data.get("tmdb_id") or meta_data.get("id")
 
             # Skip if already watched or no IMDB ID
-            if not imdb_id or imdb_id in watched_imdb_ids or (tmdb_id and tmdb_id in watched_tmdb_ids):
+            if not imdb_id or imdb_id in watched_imdb_ids:
                 continue
 
             if imdb_id not in unique_recommendations:
