@@ -27,5 +27,5 @@ async def manifest(encoded: str):
             {"type": "movie", "id": "watchly.rec", "name": "Recommended", "extra": []},
             {"type": "series", "id": "watchly.rec", "name": "Recommended", "extra": []},
         ],
-        "behaviorHints": {"configurable": True, "configurationRequired": True},
+        "behaviorHints": {"configurable": True, "configurationRequired": False},
     }
