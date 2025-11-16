@@ -49,6 +49,21 @@ class RecommendationService:
         self.stremio_service = stremio_service or StremioService()
         self.per_item_limit = 20
 
+    async def _fetch_catlogs_from_tmdb_addon(self, items: list[dict], media_type: str):
+        final_results = []
+        # now fetch addon meta for each recommendation
+        fetch_meta_tasks = [
+            self.tmdb_service.get_addon_meta(media_type, f"tmdb:{item.get('id')}") for item in items
+        ]
+        addon_meta_results = await asyncio.gather(*fetch_meta_tasks, return_exceptions=True)
+        for addon_meta in addon_meta_results:
+            if isinstance(addon_meta, Exception):
+                logger.warning(f"Error processing source item: {addon_meta}")
+                continue
+            meta_data = addon_meta.get("meta", {})
+            final_results.append(meta_data)
+        return final_results
+
     async def get_recommendations_for_item(self, item_id: str) -> List[Dict]:
         """
         Get recommendations for a specific item by IMDB ID.
@@ -63,7 +78,7 @@ class RecommendationService:
                 logger.warning(f"No TMDB ID found for {item_id}")
                 return []
         else:
-            tmdb_id = int(item_id.split(":")[1])
+            tmdb_id = item_id.split(":")[1]
 
         media_type = "movie" if media_type == "movie" else "tv"
 
@@ -75,20 +90,14 @@ class RecommendationService:
             return []
 
         logger.info(f"Found {len(recommendations)} recommendations for {item_id}")
-        return recommendations
+        return await self._fetch_catlogs_from_tmdb_addon(recommendations, media_type)
 
-    async def _fetch_recommendations_from_tmdb(self, item_id: int, media_type: str, limit: int) -> List[Dict]:
+    async def _fetch_recommendations_from_tmdb(self, item_id: str, media_type: str, limit: int) -> List[Dict]:
         """
         Fetch recommendations from TMDB for a given TMDB ID.
         """
-        # if item id is imdb_id, convert it to tmdb_id
-        if item_id.startswith("tt"):
-            tmdb_id, _ = await self.tmdb_service.find_by_imdb_id(item_id)
-            if not tmdb_id:
-                logger.warning(f"No TMDB ID found for {item_id}")
-                return []
-        else:
-            tmdb_id = int(item_id.split(":")[1])
+        if isinstance(item_id, int):
+            tmdb_id = str(item_id)
 
         media_type = "movie" if media_type == "movie" else "tv"
 
@@ -251,17 +260,4 @@ class RecommendationService:
         recommendations = await self.tmdb_service.get_discover(media_type=media_type, params=params)
         recommendations = recommendations.get("results", [])
 
-        final_recommendations = []
-        # now fetch addon meta for each recommendation
-        fetch_meta_tasks = [
-            self.tmdb_service.get_addon_meta(media_type, f"tmdb:{recommendation.get('id')}")
-            for recommendation in recommendations
-        ]
-        addon_meta_results = await asyncio.gather(*fetch_meta_tasks, return_exceptions=True)
-        for addon_meta in addon_meta_results:
-            if isinstance(addon_meta, Exception):
-                logger.warning(f"Error processing source item: {addon_meta}")
-                continue
-            meta_data = addon_meta.get("meta", {})
-            final_recommendations.append(meta_data)
-        return final_recommendations
+        return await self._fetch_catlogs_from_tmdb_addon(recommendations, media_type)
