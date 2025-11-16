@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from .endpoints.manifest import router as manifest_router
 from .endpoints.catalogs import router as catalogs_router
 from .endpoints.caching import router as caching_router
+from .endpoints.streams import router as streams_router
 
 api_router = APIRouter()
 
@@ -14,3 +15,4 @@ async def root():
 api_router.include_router(manifest_router)
 api_router.include_router(catalogs_router)
 api_router.include_router(caching_router)
+api_router.include_router(streams_router)

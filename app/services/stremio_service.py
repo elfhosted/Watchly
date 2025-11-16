@@ -2,11 +2,13 @@ import httpx
 from typing import List, Dict, Optional
 from loguru import logger
 from app.config import settings
-from app.utils import cached_api_call
 
 import asyncio
 
-
+BASE_CATALOGS = [
+    {"type": "movie", "id": "watchly.rec", "name": "Recommended", "extra": []},
+    {"type": "series", "id": "watchly.rec", "name": "Recommended", "extra": []},
+]
 class StremioService:
     """Service for interacting with Stremio API to fetch user library."""
 
@@ -69,7 +71,6 @@ class StremioService:
             logger.error(f"Error authenticating with Stremio: {e}", exc_info=True)
             raise
 
-    @cached_api_call
     async def is_loved(self, auth_key: str, imdb_id: str, media_type: str) -> bool:
         """Check if user has loved a movie or series."""
         if not imdb_id.startswith("tt"):
@@ -97,7 +98,6 @@ class StremioService:
             )
             return False
 
-    @cached_api_call
     async def get_library_items(self) -> Dict[str, List[Dict]]:
         """
         Fetch library items from Stremio once and return both watched and loved items.
@@ -132,7 +132,11 @@ class StremioService:
             watched_items = [
                 item
                 for item in items
-                if item.get("state", {}).get("timesWatched", 0) > 0
+                if (
+                    item.get("state", {}).get("timesWatched", 0) > 0
+                    and item.get("type") in ["movie", "series"]
+                    and item.get("_id").startswith("tt")
+                )
             ]
             logger.info(f"Filtered {len(watched_items)} watched library items")
 
@@ -158,6 +162,7 @@ class StremioService:
                         "type": item.get("type"),
                         "_id": item.get("_id"),
                         "_mtime": item.get("_mtime", ""),
+                        "name": item.get("name"),
                     }
                 )
 
@@ -169,6 +174,7 @@ class StremioService:
                         "type": item.get("type"),
                         "_id": item.get("_id"),
                         "_mtime": item.get("_mtime", ""),
+                        "name": item.get("name"),
                     }
                 )
 
@@ -179,3 +185,45 @@ class StremioService:
         except Exception as e:
             logger.error(f"Error fetching library items: {e}", exc_info=True)
             return {"watched": [], "loved": []}
+
+    async def get_addons(self, auth_key: str | None = None) -> list[dict]:
+        """Get addons from Stremio."""
+        url = f"{self.base_url}/api/addonCollectionGet"
+        payload = {
+            "type": "AddonCollectionGet",
+            "authKey": auth_key or await self._get_auth_token(),
+            "update": True,
+        }
+        client = await self._get_client()
+        result = await client.post(url, json=payload)
+        result.raise_for_status()
+        logger.info(f"Found {len(result.json().get('result', {}).get('addons', []))} addons")
+        return result.json().get("result", {}).get("addons", [])
+
+    async def update_addon(self, addons: list[dict], auth_key: str | None = None):
+        """Update an addon in Stremio."""
+        url = f"{self.base_url}/api/addonCollectionSet"
+        payload = {
+            "type": "AddonCollectionSet",
+            "authKey": auth_key or await self._get_auth_token(),
+            "addons": addons,
+        }
+
+        client = await self._get_client()
+        result = await client.post(url, json=payload)
+        result.raise_for_status()
+        logger.info(f"Updated addons")
+        return result.json().get("result", {}).get("success", False)
+
+    async def update_catalogs(self, catalogs: list[dict], auth_key: str | None = None):
+        auth_key = auth_key or await self._get_auth_token()
+        addons = await self.get_addons(auth_key)
+        catalogs = BASE_CATALOGS + catalogs
+        logger.info(f"Found {len(addons)} addons")
+        # find addon with id "com.watchly"
+        for addon in addons:
+            if addon.get("manifest", {}).get("id") == "com.watchly":
+                logger.info(f"Found addon with id com.watchly")
+                addon["manifest"]["catalogs"] = catalogs
+                break
+        return await self.update_addon(addons, auth_key)

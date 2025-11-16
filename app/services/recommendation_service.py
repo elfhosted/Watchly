@@ -38,6 +38,21 @@ class RecommendationService:
     def __init__(self):
         self.tmdb_service = TMDBService()
         self.stremio_service = StremioService()
+        self.per_item_limit = 20
+
+    async def get_recommendations_for_item(self, item_id: str) -> List[Dict]:
+        # find tmdb id
+        tmdb_id, media_type = await self.tmdb_service.find_by_imdb_id(item_id)
+        if not tmdb_id:
+            logger.warning(f"No TMDB ID found for {item_id}")
+            return []
+        # get details by tmdb id
+        recommendations = await self._get_recommendations_for_seed(tmdb_id, media_type, self.per_item_limit)
+        if not recommendations:
+            logger.warning(f"No recommendations found for {item_id}")
+            return []
+        logger.info(f"Found {len(recommendations)} recommendations for {item_id}")
+        return recommendations
 
     async def get_recommendations(
         self,
@@ -211,6 +226,7 @@ class RecommendationService:
         try:
             # Get recommendations from TMDB (returns first page of results)
             rec_data = await self.tmdb_service.get_recommendations(tmdb_id, media_type)
+            print(rec_data)
             all_results = rec_data.get("results", [])
 
             # Get IMDB IDs in parallel (need to fetch basic details to get IMDB ID)

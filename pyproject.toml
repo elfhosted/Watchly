@@ -1,0 +1,21 @@
+[project]
+name = "watchly"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cachetools>=6.2.2",
+    "fastapi>=0.104.1",
+    "httpx>=0.25.2",
+    "loguru>=0.7.2",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "uvicorn[standard]>=0.24.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.11.0",
+    "flake9>=3.8.3.post2",
+]

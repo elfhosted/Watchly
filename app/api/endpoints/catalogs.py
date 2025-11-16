@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Response
 from loguru import logger
 from app.services.recommendation_service import RecommendationService
+from app.services.stremio_service import StremioService
 
 router = APIRouter(prefix="/catalog")
 
@@ -29,10 +30,16 @@ async def get_catalog(
             status_code=400, detail="Invalid type. Use 'movie' or 'series'"
         )
 
-    if id not in ["watchly.rec"]:
+    if id not in ["watchly.rec"] and not id.startswith("tt"):
         logger.warning(f"Invalid id: {id}")
         raise HTTPException(status_code=400, detail="Invalid id. Use 'watchly.rec'")
 
+    # if id starts with tt, then return recommendations for that particular item
+    if id.startswith("tt"):
+        recommendations = await recommendation_service.get_recommendations_for_item(item_id=id)
+        logger.info(f"Found {len(recommendations)} recommendations for {id}")
+        # response.headers["Cache-Control"] = "public, max-age=86400"
+        return {"metas": recommendations}
     try:
         # Get recommendations based on library
         # Use last 10 items from library, get 5 recommendations per item
@@ -58,4 +65,25 @@ async def get_catalog(
         raise
     except Exception as e:
         logger.error(f"Error fetching catalog for {type}/{id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/")
+async def update_catalogs(response: Response):
+    """
+    Update the catalogs for the addon.
+    """
+    # steps
+    # 1. Log in to stremio
+    # 2. Fetch addons and find this addon
+    # 3. Update catalogs
+    # 4. Update manifest in addons in stremio
+    try:
+        stremio_service = StremioService()
+        auth_key = await stremio_service._get_auth_token()
+        # find catalogs to update
+        catalogs = []
+        stremio_service.update_catalogs(catalogs, auth_key)
+    except Exception as e:
+        logger.error(f"Error updating catalogs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
