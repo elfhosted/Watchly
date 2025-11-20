@@ -57,6 +57,8 @@ document.addEventListener('DOMContentLoaded', function () {
                         const radio = document.querySelector(`input[name="recommendationSource"][value="${sourceValue}"]`);
                         if (radio) {
                             radio.checked = true;
+                            // Update visual state for browsers without :has() support
+                            radio.closest('.radio-label')?.classList.add('checked');
                         }
                     }
                     // Optionally show a message that fields were pre-filled
@@ -72,6 +74,25 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Check for encoded credentials on page load
     checkForEncodedCredentials();
+
+    // Add visual feedback for radio buttons
+    const radioInputs = document.querySelectorAll('input[name="recommendationSource"]');
+    radioInputs.forEach(radio => {
+        radio.addEventListener('change', function() {
+            // Remove checked class from all labels
+            document.querySelectorAll('.radio-label').forEach(label => {
+                label.classList.remove('checked');
+            });
+            // Add checked class to selected label
+            if (this.checked) {
+                this.closest('.radio-label')?.classList.add('checked');
+            }
+        });
+        // Set initial state
+        if (radio.checked) {
+            radio.closest('.radio-label')?.classList.add('checked');
+        }
+    });
 
     form.addEventListener('submit', async function (e) {
         e.preventDefault();
