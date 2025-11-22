@@ -170,14 +170,53 @@ class StremioService:
             ]
             logger.info(f"Filtered {len(watched_items)} watched library items")
 
-            # Check if user has loved the movie or series in parallel
-            loved_statuses = await asyncio.gather(
-                *[self.is_loved(auth_key, item.get("_id"), item.get("type")) for item in watched_items]
-            )
+            # Sort watched items by modification time (most recent first)
+            watched_items.sort(key=lambda x: x.get("_mtime", ""), reverse=True)
 
-            # Separate loved and watched items
-            loved_items = [item for item, loved in zip(watched_items, loved_statuses) if loved]
-            logger.info(f"Found {len(loved_items)} loved library items")
+            #  is_loved only until we find 10 movies and 10 series
+            loved_items = []
+            movies_found = 0
+            series_found = 0
+            target_count = settings.RECOMMENDATION_SOURCE_ITEMS_LIMIT
+            batch_size = 20
+
+            # Process in batches to stop early
+            for i in range(0, len(watched_items), batch_size):
+                if movies_found >= target_count and series_found >= target_count:
+                    logger.info("Found enough loved items, stopping check")
+                    break
+
+                batch = watched_items[i : i + batch_size]  # noqa: E203
+
+                # Filter batch to only check types we still need
+                check_candidates = []
+                for item in batch:
+                    itype = item.get("type")
+                    if itype == "movie" and movies_found < target_count:
+                        check_candidates.append(item)
+                    elif itype == "series" and series_found < target_count:
+                        check_candidates.append(item)
+
+                if not check_candidates:
+                    continue
+
+                # Check loved status for candidates in parallel
+                loved_statuses = await asyncio.gather(
+                    *[self.is_loved(auth_key, item.get("_id"), item.get("type")) for item in check_candidates]
+                )
+
+                # Process results
+                for item, is_loved_status in zip(check_candidates, loved_statuses):
+                    if is_loved_status:
+                        loved_items.append(item)
+                        if item.get("type") == "movie":
+                            movies_found += 1
+                        elif item.get("type") == "series":
+                            series_found += 1
+
+            logger.info(
+                f"Found {len(loved_items)} loved library items (Movies: {movies_found}, Series: {series_found})"
+            )
 
             # Format watched items
             formatted_watched = []
@@ -191,7 +230,7 @@ class StremioService:
                     }
                 )
 
-            # Format and sort loved items
+            # Format loved items (they are already somewhat sorted by discovery order, which aligns with mtime)
             formatted_loved = []
             for item in loved_items:
                 formatted_loved.append(
@@ -202,9 +241,6 @@ class StremioService:
                         "name": item.get("name"),
                     }
                 )
-
-            # Sort loved items by modification time (most recent first)
-            formatted_loved.sort(key=lambda x: x.get("_mtime", ""), reverse=True)
 
             return {"watched": formatted_watched, "loved": formatted_loved}
         except Exception as e:
@@ -233,7 +269,7 @@ class StremioService:
                 message = error_payload.get("message") or message
             elif isinstance(error_payload, str):
                 message = error_payload or message
-            logger.warning("Addon collection request failed: {}", error_payload)
+            logger.warning(f"Addon collection request failed: {error_payload}")
             raise ValueError(f"Stremio: {message}")
         addons = data.get("result", {}).get("addons", [])
         logger.info(f"Found {len(addons)} addons")

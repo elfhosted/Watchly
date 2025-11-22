@@ -56,6 +56,11 @@ async def lifespan(app: FastAPI):
         logger.info("Background catalog updates stopped")
 
 
+if settings.APP_ENV != "development":
+    lifespan = lifespan
+else:
+    lifespan = None
+
 app = FastAPI(
     title="Watchly",
     description="Stremio catalog addon for movie and series recommendations",

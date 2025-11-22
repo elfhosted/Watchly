@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "production"] = "development"
     HOST_NAME: str = "https://1ccea4301587-watchly.baby-beamup.club"
 
+    # recommendation Settings
+    RECOMMENDATION_SOURCE_ITEMS_LIMIT: int = 10
+
     @property
     def TMDB_ADDON_URL(self) -> str:
         return f"{self.TMDB_ADDON_HOST}/{self.TMDB_ADDON_CONFIG}"
