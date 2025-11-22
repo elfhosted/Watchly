@@ -1,6 +1,8 @@
 import asyncio
 from collections import Counter
 
+from loguru import logger
+
 from app.services.stremio_service import StremioService
 from app.services.tmdb_service import TMDBService
 
@@ -59,6 +61,32 @@ class DynamicCatalogService:
 
         return catalogs
 
+    async def _get_item_genres(self, item_id: str, item_type: str) -> list[str]:
+        """Fetch genres for a specific item from TMDB."""
+        try:
+            # Convert IMDB ID to TMDB ID
+            tmdb_id = None
+            media_type = "movie" if item_type == "movie" else "tv"
+
+            if item_id.startswith("tt"):
+                tmdb_id, _ = await self.tmdb_service.find_by_imdb_id(item_id)
+            elif item_id.startswith("tmdb:"):
+                tmdb_id = int(item_id.split(":")[1])
+
+            if not tmdb_id:
+                return []
+
+            # Fetch details
+            if media_type == "movie":
+                details = await self.tmdb_service.get_movie_details(tmdb_id)
+            else:
+                details = await self.tmdb_service.get_tv_details(tmdb_id)
+
+            return [g.get("name") for g in details.get("genres", [])]
+        except Exception as e:
+            logger.warning(f"Failed to fetch genres for {item_id}: {e}")
+            return []
+
     async def get_genre_based_catalogs(self, library_items: list[dict]):
         # get separate movies and series lists from loved items
         loved_movies = [item for item in library_items.get("loved", []) if item.get("type") == "movie"]
@@ -68,22 +96,19 @@ class DynamicCatalogService:
         loved_movies = loved_movies[:5]
         loved_series = loved_series[:5]
 
-        # fetch details:: genre details from tmdb addon
-        movie_tasks = [self.tmdb_service.get_addon_meta("movie", item.get("_id").strip()) for item in loved_movies]
-        series_tasks = [self.tmdb_service.get_addon_meta("series", item.get("_id").strip()) for item in loved_series]
-        movie_details = await asyncio.gather(*movie_tasks)
-        series_details = await asyncio.gather(*series_tasks)
+        # fetch genres concurrently
+        movie_tasks = [self._get_item_genres(item.get("_id").strip(), "movie") for item in loved_movies]
+        series_tasks = [self._get_item_genres(item.get("_id").strip(), "series") for item in loved_series]
 
-        # now fetch all genres for moviees and series and sort them by their occurance
-        movie_genres = [detail.get("meta", {}).get("genres", []) for detail in movie_details]
-        series_genres = [detail.get("meta", {}).get("genres", []) for detail in series_details]
+        movie_genres_list = await asyncio.gather(*movie_tasks)
+        series_genres_list = await asyncio.gather(*series_tasks)
 
         # now flatten list and count the occurance of each genre for both movies and series separately
         movie_genre_counts = Counter(
-            [genre for sublist in movie_genres for genre in sublist if genre in MOVIE_GENRE_TO_ID_MAP]
+            [genre for sublist in movie_genres_list for genre in sublist if genre in MOVIE_GENRE_TO_ID_MAP]
         )
         series_genre_counts = Counter(
-            [genre for sublist in series_genres for genre in sublist if genre in SERIES_GENRE_TO_ID_MAP]
+            [genre for sublist in series_genres_list for genre in sublist if genre in SERIES_GENRE_TO_ID_MAP]
         )
         sorted_movie_genres = sorted(movie_genre_counts.items(), key=lambda x: x[1], reverse=True)
         sorted_series_genres = sorted(series_genre_counts.items(), key=lambda x: x[1], reverse=True)
@@ -97,22 +122,24 @@ class DynamicCatalogService:
         top_2_series_genres = [str(SERIES_GENRE_TO_ID_MAP[genre_name]) for genre_name in top_2_series_genre_names]
         catalogs = []
 
-        catalogs.append(
-            {
-                "type": "movie",
-                "id": f"watchly.genre.{'_'.join(top_2_movie_genres)}",
-                "name": "You might also Like",
-                "extra": [],
-            }
-        )
+        if top_2_movie_genres:
+            catalogs.append(
+                {
+                    "type": "movie",
+                    "id": f"watchly.genre.{'_'.join(top_2_movie_genres)}",
+                    "name": "You might also Like",
+                    "extra": [],
+                }
+            )
 
-        catalogs.append(
-            {
-                "type": "series",
-                "id": f"watchly.genre.{'_'.join(top_2_series_genres)}",
-                "name": "You might also Like",
-                "extra": [],
-            }
-        )
+        if top_2_series_genres:
+            catalogs.append(
+                {
+                    "type": "series",
+                    "id": f"watchly.genre.{'_'.join(top_2_series_genres)}",
+                    "name": "You might also Like",
+                    "extra": [],
+                }
+            )
 
         return catalogs

@@ -11,10 +11,8 @@ class TMDBService:
     def __init__(self):
         self.api_key = settings.TMDB_API_KEY
         self.base_url = "https://api.themoviedb.org/3"
-        self.addon_url = settings.TMDB_ADDON_URL
         # Reuse HTTP client for connection pooling and better performance
         self._client: httpx.AsyncClient | None = None
-        self._addon_client: httpx.AsyncClient | None = None
         if not self.api_key:
             logger.warning("TMDB_API_KEY is not configured. Catalog endpoints will fail until the key is provided.")
 
@@ -27,34 +25,11 @@ class TMDBService:
             )
         return self._client
 
-    async def _get_addon_client(self) -> httpx.AsyncClient:
-        """Get or create the addon API client."""
-        if self._addon_client is None:
-            self._addon_client = httpx.AsyncClient(
-                timeout=10.0,
-                limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            )
-        return self._addon_client
-
     async def close(self):
         """Close HTTP clients."""
         if self._client:
             await self._client.aclose()
             self._client = None
-        if self._addon_client:
-            await self._addon_client.aclose()
-            self._addon_client = None
-
-    # Increase cache size significantly as this is a hot path for recommendations
-    # 5000 items * ~1KB per item = ~5MB memory, very safe
-    @alru_cache(maxsize=5000)
-    async def get_addon_meta(self, type: str, id: str) -> dict:
-        """Get addon metadata for a specific type and ID."""
-        url = f"{self.addon_url}/meta/{type}/{id}.json"
-        client = await self._get_addon_client()
-        response = await client.get(url)
-        response.raise_for_status()
-        return response.json()
 
     async def _make_request(self, endpoint: str, params: dict | None = None) -> dict:
         """Make a request to the TMDB API."""
@@ -129,13 +104,13 @@ class TMDBService:
             logger.warning(f"Unexpected error finding TMDB ID for IMDB {imdb_id}: {e}")
             return None, None
 
-    @alru_cache(maxsize=1000)
+    @alru_cache(maxsize=5000)
     async def get_movie_details(self, movie_id: int) -> dict:
         """Get details of a specific movie with credits and external IDs."""
         params = {"append_to_response": "credits,external_ids"}
         return await self._make_request(f"/movie/{movie_id}", params=params)
 
-    @alru_cache(maxsize=1000)
+    @alru_cache(maxsize=5000)
     async def get_tv_details(self, tv_id: int) -> dict:
         """Get details of a specific TV series with credits and external IDs."""
         params = {"append_to_response": "credits,external_ids"}
@@ -156,8 +131,18 @@ class TMDBService:
         return await self._make_request(endpoint, params=params)
 
     @alru_cache(maxsize=1000)
-    async def get_discover(self, media_type: str, params: dict[str, str]) -> dict:
+    async def get_discover(
+        self,
+        media_type: str,
+        with_genres: str | None = None,
+        sort_by: str = "popularity.desc",
+        page: int = 1,
+    ) -> dict:
         """Get discover content based on params."""
         media_type = "movie" if media_type == "movie" else "tv"
+        params = {"page": page, "sort_by": sort_by}
+        if with_genres:
+            params["with_genres"] = with_genres
+
         endpoint = f"/discover/{media_type}"
         return await self._make_request(endpoint, params=params)

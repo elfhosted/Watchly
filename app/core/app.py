@@ -1,4 +1,3 @@
-import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,18 +13,17 @@ from app.services.catalog_updater import BackgroundCatalogUpdater
 
 from .config import settings
 
+# class InterceptHandler(logging.Handler):
+#     def emit(self, record):
+#         try:
+#             level = logger.level(record.levelname).name
+#         except Exception:
+#             level = record.levelno
 
-class InterceptHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            level = logger.level(record.levelname).name
-        except Exception:
-            level = record.levelno
-
-        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+#         logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
 
-logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
+# logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
 
 # Global catalog updater instance
 catalog_updater: BackgroundCatalogUpdater | None = None
@@ -46,7 +44,6 @@ async def lifespan(app: FastAPI):
             "Background catalog updates enabled (interval=%ss)",
             settings.CATALOG_REFRESH_INTERVAL_SECONDS,
         )
-
     yield
 
     # Shutdown

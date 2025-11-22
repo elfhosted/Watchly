@@ -41,7 +41,7 @@ class RecommendationService:
     1. Get user's loved and watched items from Stremio library
     2. Use loved items as "source items" to find similar content from TMDB
     3. Filter out items already in the user's watched library
-    4. Fetch full metadata from TMDB addon
+    4. Fetch full metadata from TMDB
     5. Return formatted recommendations
     """
 
@@ -52,20 +52,80 @@ class RecommendationService:
         self.stremio_service = stremio_service
         self.per_item_limit = 20
 
-    async def _fetch_catlogs_from_tmdb_addon(self, items: list[dict], media_type: str):
+    async def _fetch_metadata_for_items(self, items: list[dict], media_type: str) -> list[dict]:
+        """
+        Fetch detailed metadata for items directly from TMDB API and format for Stremio.
+        """
         final_results = []
-        media_type = "movie" if media_type == "movie" else "series"
-        # now fetch addon meta for each recommendation
-        fetch_meta_tasks = [self.tmdb_service.get_addon_meta(media_type, f"tmdb:{item.get('id')}") for item in items]
-        addon_meta_results = await asyncio.gather(*fetch_meta_tasks, return_exceptions=True)
-        for addon_meta in addon_meta_results:
-            if isinstance(addon_meta, Exception):
-                logger.warning(f"Error processing source item: {addon_meta}")
+        # Ensure media_type is correct
+        query_media_type = "movie" if media_type == "movie" else "tv"
+
+        async def _fetch_details(tmdb_id: int):
+            try:
+                if query_media_type == "movie":
+                    return await self.tmdb_service.get_movie_details(tmdb_id)
+                else:
+                    return await self.tmdb_service.get_tv_details(tmdb_id)
+            except Exception as e:
+                logger.warning(f"Failed to fetch details for TMDB ID {tmdb_id}: {e}")
+                return None
+
+        # Create tasks for all items to fetch details (needed for IMDB ID and full meta)
+        # Filter out items without ID
+        valid_items = [item for item in items if item.get("id")]
+        tasks = [_fetch_details(item["id"]) for item in valid_items]
+
+        if not tasks:
+            return []
+
+        details_results = await asyncio.gather(*tasks)
+
+        for details in details_results:
+            if not details:
                 continue
-            meta_data = addon_meta.get("meta", {})
-            if not hasattr(meta_data, "id"):
-                meta_data["id"] = meta_data.get("imdb_id")
+
+            # Extract IMDB ID from external_ids
+            external_ids = details.get("external_ids", {})
+            imdb_id = external_ids.get("imdb_id")
+            tmdb_id = details.get("id")
+
+            # Prefer IMDB ID, fallback to TMDB ID
+            stremio_id = imdb_id if imdb_id else f"tmdb:{tmdb_id}"
+
+            # Construct Stremio meta object
+            title = details.get("title") or details.get("name")
+            if not title:
+                continue
+
+            # Image paths
+            poster_path = details.get("poster_path")
+            backdrop_path = details.get("backdrop_path")
+
+            release_date = details.get("release_date") or details.get("first_air_date") or ""
+            year = release_date[:4] if release_date else None
+
+            meta_data = {
+                "id": stremio_id,
+                "type": media_type,
+                "name": title,
+                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
+                "background": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
+                "description": details.get("overview"),
+                "releaseInfo": year,
+                "imdbRating": str(details.get("vote_average", "")),
+                "genres": [g.get("name") for g in details.get("genres", [])],
+            }
+
+            # Add runtime if available (Movie) or episode run time (TV)
+            runtime = details.get("runtime")
+            if not runtime and details.get("episode_run_time"):
+                runtime = details.get("episode_run_time")[0]
+
+            if runtime:
+                meta_data["runtime"] = f"{runtime} min"
+
             final_results.append(meta_data)
+
         return final_results
 
     async def get_recommendations_for_item(self, item_id: str) -> list[dict]:
@@ -83,18 +143,22 @@ class RecommendationService:
                 return []
         else:
             tmdb_id = item_id.split(":")[1]
+            # Default to movie if we can't determine type from ID
+            media_type = "movie"
 
-        media_type = "movie" if media_type == "movie" else "tv"
+        # Safety check
+        if not media_type:
+            media_type = "movie"
 
         # Get recommendations (empty sets mean no library filtering)
-        recommendations = await self._fetch_recommendations_from_tmdb(tmdb_id, media_type, self.per_item_limit)
+        recommendations = await self._fetch_recommendations_from_tmdb(str(tmdb_id), media_type, self.per_item_limit)
 
         if not recommendations:
             logger.warning(f"No recommendations found for {item_id}")
             return []
 
         logger.info(f"Found {len(recommendations)} recommendations for {item_id}")
-        return await self._fetch_catlogs_from_tmdb_addon(recommendations, media_type)
+        return await self._fetch_metadata_for_items(recommendations, media_type)
 
     async def _fetch_recommendations_from_tmdb(self, item_id: str, media_type: str, limit: int) -> list[dict]:
         """
@@ -104,16 +168,16 @@ class RecommendationService:
             item_id = str(item_id)
 
         if item_id.startswith("tt"):
-            tmdb_id, media_type = await self.tmdb_service.find_by_imdb_id(item_id)
+            tmdb_id, detected_type = await self.tmdb_service.find_by_imdb_id(item_id)
             if not tmdb_id:
                 logger.warning(f"No TMDB ID found for {item_id}")
                 return []
+            if detected_type:
+                media_type = detected_type
         elif item_id.startswith("tmdb:"):
             tmdb_id = int(item_id.split(":")[1])
         else:
             tmdb_id = item_id
-
-        media_type = "movie" if media_type == "movie" else "tv"
 
         recommendation_response = await self.tmdb_service.get_recommendations(tmdb_id, media_type)
         recommended_items = recommendation_response.get("results", [])
@@ -140,6 +204,7 @@ class RecommendationService:
         5. Filter out items already watched
         6. Aggregate and deduplicate recommendations
         7. Sort by relevance score
+        8. Fetch full metadata for final list
 
         Args:
             content_type: "movie" or "series"
@@ -227,7 +292,27 @@ class RecommendationService:
             for recommendation in recommendation_batch:
                 flat_recommendations.append(recommendation)
 
-        final_recommendations = await self._fetch_catlogs_from_tmdb_addon(flat_recommendations, content_type)
+        # Step 7: Deduplicate and filter BEFORE fetching full meta
+        filtered_tmdb_items = []
+        seen_tmdb_ids = set()
+
+        for item in flat_recommendations:
+            tmdb_id = item.get("id")
+            if not tmdb_id or tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids:
+                continue
+
+            # Simple dedupe based on TMDB ID first
+            seen_tmdb_ids.add(tmdb_id)
+
+            # We'll do the full scoring logic after fetching meta, but we can prep unique list now
+            filtered_tmdb_items.append(item)
+
+            # Optimization: If we have way too many, cut off early
+            if len(filtered_tmdb_items) >= max_results * 2:
+                break
+
+        # Step 8: Fetch full metadata
+        final_recommendations = await self._fetch_metadata_for_items(filtered_tmdb_items, content_type)
 
         for meta_data in final_recommendations:
             imdb_id = meta_data.get("imdb_id") or meta_data.get("id")
@@ -237,20 +322,27 @@ class RecommendationService:
                 continue
 
             if imdb_id not in unique_recommendations:
-                meta_data["_score"] = float(meta_data.get("imdbRating", 0))
+                # Base score from IMDB rating
+                try:
+                    score = float(meta_data.get("imdbRating", 0))
+                except (ValueError, TypeError):
+                    score = 0.0
+                meta_data["_score"] = score
                 unique_recommendations[imdb_id] = meta_data
             else:
                 # Boost score if recommended by multiple source items
                 existing_recommendation = unique_recommendations[imdb_id]
-                existing_recommendation["_score"] = existing_recommendation.get("_score", 0) + float(
-                    meta_data.get("imdbRating", 0)
-                )
+                try:
+                    additional_score = float(meta_data.get("imdbRating", 0))
+                except (ValueError, TypeError):
+                    additional_score = 0.0
+                existing_recommendation["_score"] = existing_recommendation.get("_score", 0) + additional_score
 
             # Early exit if we have enough results
             if len(unique_recommendations) >= max_results:
                 break
 
-        # Step 7: Sort by score (higher score = more relevant, appears from more sources)
+        # Step 9: Sort by score (higher score = more relevant, appears from more sources)
         sorted_recommendations = sorted(
             unique_recommendations.values(),
             key=lambda x: x.get("_score", 0),
@@ -270,15 +362,13 @@ class RecommendationService:
 
         # genre_id params, replace - with , and _ with |
         genre_id_params = genre_id.replace("-", ",").replace("_", "|")
-        # build payloads
-        params = {
-            "sort_by": "popularity.desc",
-            "with_genres": genre_id_params,
-        }
-
         # now call discover api
         # get recommendations from tmdb api
-        recommendations = await self.tmdb_service.get_discover(media_type=media_type, params=params)
+        recommendations = await self.tmdb_service.get_discover(
+            media_type=media_type,
+            with_genres=genre_id_params,
+            sort_by="popularity.desc",
+        )
         recommendations = recommendations.get("results", [])
 
-        return await self._fetch_catlogs_from_tmdb_addon(recommendations, media_type)
+        return await self._fetch_metadata_for_items(recommendations, media_type)
