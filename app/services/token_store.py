@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import redis.asyncio as redis
+from cachetools import TTLCache
 from cryptography.fernet import Fernet, InvalidToken
 from loguru import logger
 
@@ -20,6 +21,9 @@ class TokenStore:
     def __init__(self) -> None:
         self._client: redis.Redis | None = None
         self._cipher: Fernet | None = None
+        # Cache decrypted payloads for 1 day (86400s) to reduce Redis hits
+        # Max size 5000 allows many active users without eviction
+        self._payload_cache: TTLCache = TTLCache(maxsize=5000, ttl=86400)
 
         if not settings.REDIS_URL:
             logger.warning("REDIS_URL is not set. Token storage will fail until a Redis instance is configured.")
@@ -93,15 +97,22 @@ class TokenStore:
         if settings.TOKEN_TTL_SECONDS and settings.TOKEN_TTL_SECONDS > 0:
             await client.setex(key, settings.TOKEN_TTL_SECONDS, encrypted_value)
             logger.info(
-                "Stored encrypted credential payload with TTL %s seconds",
-                settings.TOKEN_TTL_SECONDS,
+                f"Stored encrypted credential payload with TTL {settings.TOKEN_TTL_SECONDS} seconds",
             )
         else:
             await client.set(key, encrypted_value)
             logger.info("Stored encrypted credential payload without expiration")
+
+        # Cache the new payload immediately to avoid next-read hit
+        self._payload_cache[token] = normalized
+
         return token, not bool(existing)
 
     async def get_payload(self, token: str) -> dict[str, Any] | None:
+        # Check local LRU cache first
+        if token in self._payload_cache:
+            return self._payload_cache[token]
+
         hashed = self._hash_token(token)
         key = self._format_key(hashed)
         client = await self._get_client()
@@ -113,7 +124,11 @@ class TokenStore:
         try:
             # Decrypt -> JSON Decode
             decrypted_json = self._get_cipher().decrypt(encrypted_raw.encode()).decode("utf-8")
-            return json.loads(decrypted_json)
+            payload = json.loads(decrypted_json)
+
+            # Cache for subsequent reads
+            self._payload_cache[token] = payload
+            return payload
         except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("Failed to decrypt or decode cached payload for token. Key might have changed.")
             return None
@@ -124,12 +139,16 @@ class TokenStore:
         client = await self._get_client()
         await client.delete(key)
 
+        # Invalidate local cache
+        if token in self._payload_cache:
+            del self._payload_cache[token]
+
     async def iter_payloads(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """Iterate over all stored payloads, yielding key and payload."""
         try:
             client = await self._get_client()
         except (redis.RedisError, OSError) as exc:
-            logger.warning("Skipping credential iteration; Redis unavailable: %s", exc)
+            logger.warning(f"Skipping credential iteration; Redis unavailable: {exc}")
             return
 
         pattern = f"{self.KEY_PREFIX}*"
@@ -140,7 +159,7 @@ class TokenStore:
                 try:
                     encrypted_raw = await client.get(key)
                 except (redis.RedisError, OSError) as exc:
-                    logger.warning("Failed to fetch payload for %s: %s", key, exc)
+                    logger.warning(f"Failed to fetch payload for {key}: {exc}")
                     continue
 
                 if encrypted_raw is None:
@@ -150,12 +169,12 @@ class TokenStore:
                     decrypted_json = cipher.decrypt(encrypted_raw.encode()).decode("utf-8")
                     payload = json.loads(decrypted_json)
                 except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError):
-                    logger.warning("Failed to decrypt payload for key %s. Skipping.", key)
+                    logger.warning(f"Failed to decrypt payload for key {key}. Skipping.")
                     continue
 
                 yield key, payload
         except (redis.RedisError, OSError) as exc:
-            logger.warning("Failed to scan credential tokens: %s", exc)
+            logger.warning(f"Failed to scan credential tokens: {exc}")
 
 
 token_store = TokenStore()
