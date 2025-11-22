@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -5,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import redis.asyncio as redis
+from cryptography.fernet import Fernet, InvalidToken
 from loguru import logger
 
 from app.core.config import settings
@@ -17,6 +19,8 @@ class TokenStore:
 
     def __init__(self) -> None:
         self._client: redis.Redis | None = None
+        self._cipher: Fernet | None = None
+
         if not settings.REDIS_URL:
             logger.warning("REDIS_URL is not set. Token storage will fail until a Redis instance is configured.")
         if not settings.TOKEN_SALT or settings.TOKEN_SALT == "change-me":
@@ -30,6 +34,16 @@ class TokenStore:
             raise RuntimeError(
                 "Server misconfiguration: TOKEN_SALT must be set to a non-default value before storing credentials."
             )
+
+    def _get_cipher(self) -> Fernet:
+        """Get or create Fernet cipher instance based on TOKEN_SALT."""
+        if self._cipher is None:
+            # Derive a 32-byte key from TOKEN_SALT using SHA256, then URL-safe base64 encode it
+            # This ensures we always have a valid Fernet key regardless of the salt's format
+            key_bytes = hashlib.sha256(settings.TOKEN_SALT.encode()).digest()
+            fernet_key = base64.urlsafe_b64encode(key_bytes)
+            self._cipher = Fernet(fernet_key)
+        return self._cipher
 
     async def _get_client(self) -> redis.Redis:
         if self._client is None:
@@ -68,31 +82,40 @@ class TokenStore:
         token = self._derive_token_value(normalized)
         hashed = self._hash_token(token)
         key = self._format_key(hashed)
+
+        # JSON Encode -> Encrypt -> Store
+        json_str = json.dumps(normalized)
+        encrypted_value = self._get_cipher().encrypt(json_str.encode()).decode("utf-8")
+
         client = await self._get_client()
         existing = await client.exists(key)
-        value = json.dumps(normalized)
+
         if settings.TOKEN_TTL_SECONDS and settings.TOKEN_TTL_SECONDS > 0:
-            await client.setex(key, settings.TOKEN_TTL_SECONDS, value)
+            await client.setex(key, settings.TOKEN_TTL_SECONDS, encrypted_value)
             logger.info(
-                "Stored credential payload with TTL %s seconds",
+                "Stored encrypted credential payload with TTL %s seconds",
                 settings.TOKEN_TTL_SECONDS,
             )
         else:
-            await client.set(key, value)
-            logger.info("Stored credential payload without expiration")
+            await client.set(key, encrypted_value)
+            logger.info("Stored encrypted credential payload without expiration")
         return token, not bool(existing)
 
     async def get_payload(self, token: str) -> dict[str, Any] | None:
         hashed = self._hash_token(token)
         key = self._format_key(hashed)
         client = await self._get_client()
-        raw = await client.get(key)
-        if raw is None:
+        encrypted_raw = await client.get(key)
+
+        if encrypted_raw is None:
             return None
+
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Failed to decode cached payload for token")
+            # Decrypt -> JSON Decode
+            decrypted_json = self._get_cipher().decrypt(encrypted_raw.encode()).decode("utf-8")
+            return json.loads(decrypted_json)
+        except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("Failed to decrypt or decode cached payload for token. Key might have changed.")
             return None
 
     async def delete_token(self, token: str) -> None:
@@ -110,20 +133,26 @@ class TokenStore:
             return
 
         pattern = f"{self.KEY_PREFIX}*"
+        cipher = self._get_cipher()
+
         try:
             async for key in client.scan_iter(match=pattern):
                 try:
-                    raw = await client.get(key)
+                    encrypted_raw = await client.get(key)
                 except (redis.RedisError, OSError) as exc:
                     logger.warning("Failed to fetch payload for %s: %s", key, exc)
                     continue
-                if raw is None:
+
+                if encrypted_raw is None:
                     continue
+
                 try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.warning("Failed to decode cached payload for key %s", key)
+                    decrypted_json = cipher.decrypt(encrypted_raw.encode()).decode("utf-8")
+                    payload = json.loads(decrypted_json)
+                except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError):
+                    logger.warning("Failed to decrypt payload for key %s. Skipping.", key)
                     continue
+
                 yield key, payload
         except (redis.RedisError, OSError) as exc:
             logger.warning("Failed to scan credential tokens: %s", exc)

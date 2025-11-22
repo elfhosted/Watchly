@@ -6,3 +6,4 @@ pydantic-settings>=2.1.0
 loguru>=0.7.2
 cachetools>=6.2.2
 redis>=5.0.1
+cryptography>=41.0.0
